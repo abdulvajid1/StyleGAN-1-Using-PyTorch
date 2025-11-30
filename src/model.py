@@ -29,6 +29,8 @@ class AdaIN(nn.Module):
         self.eps = 1e-8
         # each channel will have it's own y_scale and y_bias
         self.A = nn.Linear(in_features=w_dim, out_features=2*out_channels, bias=True)
+        self.A.weight.data.normal_(0, 1.0)
+        self.A.bias.data.zero_()
     
     def forward(self, x: torch.Tensor, w: torch.Tensor):
         style_params = self.A(w)# [ys, yb], scale and bias
@@ -40,7 +42,7 @@ class AdaIN(nn.Module):
 class NoiseInjection(nn.Module):
     def __init__(self, channels):
         super().__init__()
-        self.scale_b = nn.Parameter(torch.ones(channels))
+        self.scale_b = nn.Parameter(torch.zeros(channels))
         
     def forward(self, x: torch.Tensor):
         batch_size, C, H, W = x.shape
@@ -57,23 +59,6 @@ class PixelNorm(nn.Module):
     def forward(self, x: torch.Tensor):
         # (b, c, h, w)
         return x / (torch.sqrt(torch.mean(x*x, dim=1, keepdim=True)) + self.eps)
-
-      
-class ConvLayer(nn.Module):
-    def __init__(self, in_channel, out_channel, kernel_size, padding, stride):
-        super().__init__()
-        self.conv_layer = nn.Sequential(
-            nn.Conv2d(in_channels=in_channel, 
-                      out_channels=out_channel, 
-                      kernel_size=kernel_size, 
-                      padding=padding, 
-                      stride=stride),
-            nn.LeakyReLU(0.02),
-            PixelNorm()
-            )
-    
-    def forward(self, x: torch.Tensor):
-        return self.conv_layer(x)
     
 class ConvLayer(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, stride=1):
@@ -114,15 +99,18 @@ class GBlock(nn.Module):
 class InitialBlock(nn.Module):
     def __init__(self,channels):
         super().__init__()
+        # learned constant lantent input
         self.const_input = nn.Parameter(torch.randn(1, channels, 4, 4))
+        
         self.conv = ConvLayer(in_channels=channels, out_channels=channels)
         self.adain1 = AdaIN(out_channels=channels)
         self.adain2 = AdaIN(out_channels=channels)
+        
         self.noise1 = NoiseInjection(channels=channels)
         self.noise2 = NoiseInjection(channels=channels)
     
     def forward(self, w):
-        b, c, h, w = w.size()
+        b = w.shape[0]
         x = self.const_input.repeat(b, 1, 1, 1)
         x = self.noise1(x)
         x = nn.functional.leaky_relu(x)
@@ -139,7 +127,7 @@ class ToRGB(nn.Module):
         self.conv = ConvLayer(in_channels=in_channels, out_channels=3, kernel_size=1, stride=1, padding=0) # conv1x1
         
     def forward(self, x: torch.Tensor):
-        return nn.functional.leaky_relu(self.conv(x))
+        return self.conv(x)
     
 class FromRGB(nn.Module):
     def __init__(self, out_channels):
@@ -147,7 +135,7 @@ class FromRGB(nn.Module):
         self.conv = ConvLayer(in_channels=3, out_channels=out_channels, kernel_size=1, stride=1, padding=0) # conv1x1
         
     def forward(self, x: torch.Tensor):
-        return nn.functional.leaky_relu(self.conv(x))
+        return self.conv(x)
     
 class InputLayer(nn.Module):
     def __init__(self, latent_dim=512, num_layers=8):
@@ -160,12 +148,16 @@ class InputLayer(nn.Module):
 class Generator(nn.Module):
     def __init__(self, in_channels=512, w_dim=512,num_map_layers=8, channels=[512, 512, 512, 512, 512, 512, 256, 256, 128, 128, 64, 64, 32, 32, 16, 16]):
         super().__init__()
+        # initial block (input layer)
+        self.norm = PixelNorm()
         self.input_layer = InputLayer(latent_dim=w_dim, num_layers=num_map_layers)
         self.initial_block = InitialBlock(channels=512)
         
-        self.first_stage_block = GBlock(in_channels=8, out_channels=8)
-        self.first_stage_torgb = ToRGB(in_channels=8)
+        # if stage == 0 (no prev rgb to blend)
+        self.first_stage_block = GBlock(in_channels=512, out_channels=16)
+        self.first_stage_torgb = ToRGB(in_channels=16)
         
+        # all hidden layers
         self.hidden_layers = nn.ModuleList()
         self.to_rgb_layers = nn.ModuleList()
         for i in range(len(channels) - 1): # i + 1 shouldn't out of the range
@@ -173,6 +165,8 @@ class Generator(nn.Module):
             self.to_rgb_layers.append(ToRGB(in_channels=channels[i+1]))
     
     def forward(self, z, stage, alpha):
+        # inputs
+        z = self.norm(z)
         w = self.input_layer(z)
         x = self.initial_block(w)
         
@@ -181,15 +175,17 @@ class Generator(nn.Module):
             x = self.first_stage_block(x, w)
             return self.first_stage_torgb(x)
         
-        for i in range(stage):  # go until prev stage for fade in
+        for i in range(stage - 1):  # go until prev stage for fade in
             x = nn.functional.interpolate(x, scale_factor=2, mode='bilinear')
-            x = self.hidden_layers[i - 1](x, w) # this will never be -1 since we have different condition for zero,
+            x = self.hidden_layers[i](x, w) # this will never be -1 since we have different condition for zero,
         
-        x = nn.functional.interpolate(x, scale_factor=2, mode='bilinear')
-        x_up_rgb_raw = self.to_rgb_layers[stage - 1](x)
-        x_org = self.hidden_layers[stage](x, w)
-        x_org_rgb = self.to_rgb_layers[stage](x)
-        return (alpha * x_up_rgb_raw) + ((1 - alpha) * x_org_rgb)
+        x_upsample = nn.functional.interpolate(x, scale_factor=2, mode='bilinear')
+        
+        x_prev = self.to_rgb_layers[stage - 1](x_upsample)
+        
+        x_new = self.hidden_layers[stage](x, w)
+        x_new = self.to_rgb_layers[stage](x_new)
+        return (alpha * x_prev) + ((1 - alpha) * x_new)
         
         
         
