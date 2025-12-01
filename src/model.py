@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+layer_factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32]
+
 class FCLayer(nn.Module):
     def __init__(self, dim=512):
         super().__init__()
@@ -146,23 +148,25 @@ class InputLayer(nn.Module):
         return self.mapping_net(z)
 
 class Generator(nn.Module):
-    def __init__(self, in_channels=512, w_dim=512,num_map_layers=8, channels=[512, 512, 512, 512, 512, 512, 256, 256, 128, 128, 64, 64, 32, 32, 16, 16]):
+    def __init__(self, channel_size=512, w_dim=512, num_map_layers=8):
         super().__init__()
         # initial block (input layer)
         self.norm = PixelNorm()
         self.input_layer = InputLayer(latent_dim=w_dim, num_layers=num_map_layers)
-        self.initial_block = InitialBlock(channels=512)
+        self.initial_block = InitialBlock(channels=channel_size)
         
         # if stage == 0 (no prev rgb to blend)
-        self.first_stage_block = GBlock(in_channels=512, out_channels=16)
+        self.first_stage_block = GBlock(in_channels=channel_size, out_channels=16)
         self.first_stage_torgb = ToRGB(in_channels=16)
         
         # all hidden layers
         self.hidden_layers = nn.ModuleList()
         self.to_rgb_layers = nn.ModuleList()
-        for i in range(len(channels) - 1): # i + 1 shouldn't out of the range
-            self.hidden_layers.append(GBlock(in_channels=channels[i], out_channels=channels[i+1], w_dim=w_dim))
-            self.to_rgb_layers.append(ToRGB(in_channels=channels[i+1]))
+        for i in range(len(layer_factors) - 1): # i + 1 shouldn't out of the range
+            in_channels = int(channel_size * layer_factors[i])
+            out_channels = int(channel_size * layer_factors[i])
+            self.hidden_layers.append(GBlock(in_channels=in_channels, out_channels=out_channels, w_dim=w_dim))
+            self.to_rgb_layers.append(ToRGB(in_channels=out_channels))
     
     def forward(self, z, stage, alpha):
         # inputs
@@ -171,21 +175,52 @@ class Generator(nn.Module):
         x = self.initial_block(w)
         
         if stage == 0:
-            x = nn.functional.interpolate(x, scale_factor=2, mode='bilinear')
-            x = self.first_stage_block(x, w)
-            return self.first_stage_torgb(x)
+            upscaled = nn.functional.interpolate(x, scale_factor=2, mode='bilinear')
+            x = self.first_stage_block(upscaled, w)
+            return self.first_torgb(x)
         
-        for i in range(stage - 1):  # go until prev stage for fade in
-            x = nn.functional.interpolate(x, scale_factor=2, mode='bilinear')
-            x = self.hidden_layers[i](x, w) # this will never be -1 since we have different condition for zero,
+        for i in range(stage):  # go until prev stage for fade in
+            upscaled = nn.functional.interpolate(x, scale_factor=2, mode='bilinear')
+            generated = self.hidden_layers[i](upscaled, w)
         
-        x_upsample = nn.functional.interpolate(x, scale_factor=2, mode='bilinear')
+        # After the for loop we will get, upscaled and generated
+        prev = self.to_rgb_layers[stage - 1](upscaled)
+        generated = self.to_rgb_layers[stage](generated)
         
-        x_prev = self.to_rgb_layers[stage - 1](x_upsample)
+        return (alpha * generated) + ((1 - alpha) * prev)
+
+class DBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, w_dim=512):
+        super().__init__()
+        # either use F.interpolate(slow, low accuracy) or conv pixel suffle (more compute, more accuracy)
+        self.block = nn.Sequential(
+            ConvLayer(in_channels=in_channels, out_channels=in_channels),
+            PixelNorm(),
+            nn.LeakyReLU(0.2),
+            ConvLayer(in_channels=in_channels, out_channels=out_channels),
+            PixelNorm(),
+            nn.LeakyReLU(0.2),
+            nn.AvgPool2d(kernel_size=2, stride=2)
+        )
         
-        x_new = self.hidden_layers[stage](x, w)
-        x_new = self.to_rgb_layers[stage](x_new)
-        return (alpha * x_prev) + ((1 - alpha) * x_new)
+    def forward(self, x: torch.Tensor, w: torch.Tensor):
+        self.block(x)
+        
+        
+
+class Discriminator(nn.Module):
+    def __init__(self, last_in_channel):
+        super().__init__()
+        self.first_rgb = FromRGB(out_channels=16)
+        self.final_block = nn.Sequential(
+            ConvLayer(in_channels=last_in_channel, out_channels=last_in_channel),
+            PixelNorm(),
+            nn.LeakyReLU(0.2),
+            ConvLayer(in_channels=last_in_channel, out_channels=1, kernel_size=4),
+            PixelNorm(),
+            ConvLayer(in_channels=last_in_channel, out_channels=1, kernel_size=1, stride=1, padding=0)
+        )
+        
         
         
         
