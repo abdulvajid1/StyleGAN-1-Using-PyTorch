@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 layer_factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32]
 
@@ -86,15 +87,15 @@ class GBlock(nn.Module):
         self.adain2 = AdaIN(out_channels=out_channels, w_dim=w_dim)
         
     def forward(self, x: torch.Tensor, w: torch.Tensor):
-        x = nn.functional.interpolate(x, scale_factor=2, mode='bilinear')  # Upsample
+        x = F.interpolate(x, scale_factor=2, mode='bilinear')  # Upsample
         x = self.conv1(x)
         x = self.noise1(x)
-        x = nn.functional.leaky_relu(x, 0.2)
+        x = F.leaky_relu(x, 0.2)
         x = self.adain1(x, w)
         
         x = self.conv2(x)
         x = self.noise2(x)
-        x = nn.functional.leaky_relu(x, 0.2)
+        x = F.leaky_relu(x, 0.2)
         x = self.adain2(x, w)
         return x
 
@@ -115,11 +116,11 @@ class InitialBlock(nn.Module):
         b = w.shape[0]
         x = self.const_input.repeat(b, 1, 1, 1)
         x = self.noise1(x)
-        x = nn.functional.leaky_relu(x)
+        x = F.leaky_relu(x)
         x = self.adain1(x, w)
         x = self.conv(x)
         x = self.noise2(x)
-        x = nn.functional.leaky_relu(x)
+        x = F.leaky_relu(x)
         x = self.adain2(x, w)
         return x
 
@@ -175,12 +176,12 @@ class Generator(nn.Module):
         x = self.initial_block(w)
         
         if stage == 0:
-            upscaled = nn.functional.interpolate(x, scale_factor=2, mode='bilinear')
+            upscaled = F.interpolate(x, scale_factor=2, mode='bilinear')
             x = self.first_stage_block(upscaled, w)
             return self.first_torgb(x)
         
         for i in range(stage):  # go until prev stage for fade in
-            upscaled = nn.functional.interpolate(x, scale_factor=2, mode='bilinear')
+            upscaled = F.interpolate(x, scale_factor=2, mode='bilinear')
             generated = self.hidden_layers[i](upscaled, w)
         
         # After the for loop we will get, upscaled and generated
@@ -195,32 +196,67 @@ class DBlock(nn.Module):
         # either use F.interpolate(slow, low accuracy) or conv pixel suffle (more compute, more accuracy)
         self.block = nn.Sequential(
             ConvLayer(in_channels=in_channels, out_channels=in_channels),
-            PixelNorm(),
             nn.LeakyReLU(0.2),
             ConvLayer(in_channels=in_channels, out_channels=out_channels),
-            PixelNorm(),
             nn.LeakyReLU(0.2),
             nn.AvgPool2d(kernel_size=2, stride=2)
         )
         
-    def forward(self, x: torch.Tensor, w: torch.Tensor):
-        self.block(x)
+    def forward(self, x: torch.Tensor):
+        return self.block(x)
         
         
 
 class Discriminator(nn.Module):
-    def __init__(self, last_in_channel):
+    def __init__(self, channels_size=512):
         super().__init__()
-        self.first_rgb = FromRGB(out_channels=16)
+        self.downscale = nn.AvgPool2d(kernel_size=2, stride=2)
+        
         self.final_block = nn.Sequential(
-            ConvLayer(in_channels=last_in_channel, out_channels=last_in_channel),
-            PixelNorm(),
+            ConvLayer(in_channels=channels_size, out_channels=channels_size),
             nn.LeakyReLU(0.2),
-            ConvLayer(in_channels=last_in_channel, out_channels=1, kernel_size=4),
-            PixelNorm(),
-            ConvLayer(in_channels=last_in_channel, out_channels=1, kernel_size=1, stride=1, padding=0)
+            ConvLayer(in_channels=channels_size, out_channels=1, kernel_size=4),
+            ConvLayer(in_channels=channels_size, out_channels=1, kernel_size=1, stride=1, padding=0)
         )
         
+        self.progblock, self.rgb_layers = nn.ModuleList(), nn.ModuleList()
+
+        # we reverse the module list, start from 4x4 to img_channel, so at inference we need to reverse through this module list, from img_channel to 4x4 -> 1
+        
+        for i in range(len(layer_factors) - 1, 0,  -1): # reverse through the channels for discriminator
+            in_channels = int(channels_size * layer_factors[i])
+            out_channels = int(channels_size * layer_factors[i - 1])
+            
+            self.rgb_layers.append(FromRGB(out_channels=in_channels))
+            self.progblock.append(DBlock(in_channels=in_channels, out_channels=out_channels))
+            
+    def forward(self, x, alpha, stage):
+        curr_step = len(layer_factors) - stage
+        
+        x_rgb = F.leaky_relu(self.rgb_layers[curr_step](x), 0.2) # every one first need to convert rgb to non_rgb (disc input always will be (3,channel,channel))
+        
+        # for 4x4 img    
+        if stage == 0:
+            return self.final_block(x_rgb)
+        
+        x_downscaled = self.downscale(x)
+        x_downscaled_rgb = F.leaky_relu(self.rgb_layers[curr_step](x_downscaled), 0.2)
+        
+        x_real = self.progblock[curr_step](x_rgb)
+        
+        out = alpha * x_real + (1 - alpha) * x_downscaled_rgb
+        
+        for i in range(curr_step + 1, len(layer_factors)):
+            out = self.progblock[i](out)
+            
+        x = self.final_block(out)
+        return x
+        
+        
+        
+                     
+            
+            
         
         
         
