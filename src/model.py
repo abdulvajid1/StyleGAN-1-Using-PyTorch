@@ -238,8 +238,8 @@ class Discriminator(nn.Module):
             in_channels = int(channels_size * layer_factors[i])
             out_channels = int(channels_size * layer_factors[i - 1])
             
-            self.rgb_layers.append(FromRGB(out_channels=in_channels))
             self.progblock.append(DBlock(in_channels=in_channels, out_channels=out_channels))
+            self.rgb_layers.append(FromRGB(out_channels=out_channels))
             
     def forward(self, x, stage, alpha):
         curr_step = len(self.progblock) - stage
@@ -258,17 +258,17 @@ class Discriminator(nn.Module):
         x_downscaled = self.downscale(x)
         print(f"downscaled {x_downscaled.shape}")
         
-        x_downscaled_rgb = F.leaky_relu(self.rgb_layers[curr_step+1](x_downscaled), 0.2)
+        x_downscaled_rgb = F.leaky_relu(self.rgb_layers[curr_step + 1](x_downscaled), 0.2)
         print(f"downscaled_rgb {x_downscaled_rgb.shape}")
         
         
-        x_real = self.progblock[curr_step - 1](x_rgb)
+        x_real = self.progblock[curr_step](x_rgb)
         print(f"x_real {x_real.shape}")
         
         
         out = alpha * x_real + (1 - alpha) * x_downscaled_rgb
         
-        for i in range(curr_step, len(self.progblock) - 1): # we have final block seperate, so go until -1
+        for i in range(curr_step + 1, len(self.progblock)): # we have final block seperate, so go until -1
             out = self.progblock[i](out)
             print(f"step {i}", out.shape)
         
@@ -293,6 +293,6 @@ if __name__ == "__main__":
     x = torch.randn(1, 512)
     print(gen(x, 3,0.5))
     
-    x = torch.rand(1 ,3, 8, 8)
+    x = torch.rand(1 ,8, 1024, 1024)
     des = Discriminator()
-    des(x, 1, 1).shape
+    des(x, 8, 1).shape
