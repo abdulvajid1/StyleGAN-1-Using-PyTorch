@@ -87,7 +87,7 @@ class GBlock(nn.Module):
         self.adain2 = AdaIN(out_channels=out_channels, w_dim=w_dim)
         
     def forward(self, x: torch.Tensor, w: torch.Tensor):
-        x = F.interpolate(x, scale_factor=2, mode='bilinear')  # Upsample
+        # x = F.interpolate(x, scale_factor=2, mode='bilinear')  # Upsample
         x = self.conv1(x)
         x = self.noise1(x)
         x = F.leaky_relu(x, 0.2)
@@ -100,7 +100,7 @@ class GBlock(nn.Module):
         return x
 
 class InitialBlock(nn.Module):
-    def __init__(self,channels):
+    def __init__(self, channels):
         super().__init__()
         # learned constant lantent input
         self.const_input = nn.Parameter(torch.randn(1, channels, 4, 4))
@@ -156,13 +156,13 @@ class Generator(nn.Module):
         self.input_layer = InputLayer(latent_dim=w_dim, num_layers=num_map_layers)
         self.initial_block = InitialBlock(channels=channel_size)
         
-        # if stage == 0 (no prev rgb to blend)
-        self.first_stage_block = GBlock(in_channels=channel_size, out_channels=16)
-        self.first_stage_torgb = ToRGB(in_channels=16)
-        
         # all hidden layers
         self.hidden_layers = nn.ModuleList()
         self.to_rgb_layers = nn.ModuleList()
+        # if stage == 0 (no prev rgb to blend)
+        
+        self.to_rgb_layers.append(ToRGB(in_channels=512))
+        
         for i in range(len(layer_factors) - 1): # i + 1 shouldn't out of the range
             in_channels = int(channel_size * layer_factors[i])
             out_channels = int(channel_size * layer_factors[i+1])
@@ -173,22 +173,28 @@ class Generator(nn.Module):
         # inputs
         z = self.norm(z)
         w = self.input_layer(z)
-        x = self.initial_block(w)
+        x = self.initial_block(w) # for 4x4 
         
         if stage == 0:
-            upscaled = F.interpolate(x, scale_factor=2, mode='bilinear')
-            x = self.first_stage_block(upscaled, w)
-            return self.first_torgb(x)
+            # upscaled = F.interpolate(x, scale_factor=2, mode='bilinear')
+            # x = self.first_stage_block(upscaled, w)
+            x = self.to_rgb_layers[0](x)
+            print(x.shape)
+            return x
         
         for i in range(stage):  # go until prev stage for fade in
             upscaled = F.interpolate(x, scale_factor=2, mode='bilinear')
-            generated = self.hidden_layers[i](upscaled, w)
+            print(f"upscaled {i}", upscaled.shape)
+            x = self.hidden_layers[i](upscaled, w)
+            print(f"block {i}", x.shape)
         
         # After the for loop we will get, upscaled and generated
-        prev = self.to_rgb_layers[stage - 1](upscaled)
-        generated = self.to_rgb_layers[stage](generated)
+        prev = self.to_rgb_layers[stage-1](upscaled) # rgb layers are one step ahead so, stage will be prev and stage + 1 will current
+        generated = self.to_rgb_layers[stage](x)
         
-        return (alpha * generated) + ((1 - alpha) * prev)
+        x = (alpha * generated) + ((1 - alpha) * prev)
+        print(x.shape)
+        return x
 
 class DBlock(nn.Module):
     def __init__(self, in_channels, out_channels, w_dim=512):
@@ -255,32 +261,7 @@ class Discriminator(nn.Module):
         x = self.final_block(out)
         return x
         
-        
-        
-                     
-            
-            
-        
-        
-        
-        
-        
-        
-            
-        
-        
-        
-        
-    
-        
-        
-        
-        
-        
-        
-        
-    
-        
+ 
 
 
 # Conv layer with learned noice input
@@ -294,5 +275,6 @@ if __name__ == "__main__":
     adain = AdaIN(out_channels=5, w_dim=512)
     print(f"Successfull\nBefore: {x.shape, img.shape}; After: {model(x).shape, adain(img, x).shape}")
     
-    
-    
+    gen = Generator()
+    x = torch.randn(1, 512)
+    print(gen(x, 3,0.5))
