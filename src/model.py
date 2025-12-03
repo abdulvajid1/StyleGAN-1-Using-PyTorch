@@ -165,7 +165,7 @@ class Generator(nn.Module):
         self.to_rgb_layers = nn.ModuleList()
         for i in range(len(layer_factors) - 1): # i + 1 shouldn't out of the range
             in_channels = int(channel_size * layer_factors[i])
-            out_channels = int(channel_size * layer_factors[i])
+            out_channels = int(channel_size * layer_factors[i+1])
             self.hidden_layers.append(GBlock(in_channels=in_channels, out_channels=out_channels, w_dim=w_dim))
             self.to_rgb_layers.append(ToRGB(in_channels=out_channels))
     
@@ -215,15 +215,18 @@ class Discriminator(nn.Module):
         self.final_block = nn.Sequential(
             ConvLayer(in_channels=channels_size, out_channels=channels_size),
             nn.LeakyReLU(0.2),
-            ConvLayer(in_channels=channels_size, out_channels=1, kernel_size=4),
+            ConvLayer(in_channels=channels_size, out_channels=channels_size, kernel_size=4),
+            nn.LeakyReLU(0.2),
             ConvLayer(in_channels=channels_size, out_channels=1, kernel_size=1, stride=1, padding=0)
         )
         
         self.progblock, self.rgb_layers = nn.ModuleList(), nn.ModuleList()
+        
+        self.rgb_layers.append(FromRGB(out_channels=16)) # this is needed for the first stage, for fade in, we need two rgb layer
 
         # we reverse the module list, start from 4x4 to img_channel, so at inference we need to reverse through this module list, from img_channel to 4x4 -> 1
         
-        for i in range(len(layer_factors) - 1, 0,  -1): # reverse through the channels for discriminator
+        for i in range(len(layer_factors) - 1, 0, -1): # reverse order [16, 32, 64 .. 512]
             in_channels = int(channels_size * layer_factors[i])
             out_channels = int(channels_size * layer_factors[i - 1])
             
@@ -233,14 +236,14 @@ class Discriminator(nn.Module):
     def forward(self, x, alpha, stage):
         curr_step = len(layer_factors) - stage
         
-        x_rgb = F.leaky_relu(self.rgb_layers[curr_step](x), 0.2) # every one first need to convert rgb to non_rgb (disc input always will be (3,channel,channel))
+        x_rgb = F.leaky_relu(self.rgb_layers[curr_step](x), 0.2) 
         
         # for 4x4 img    
         if stage == 0:
             return self.final_block(x_rgb)
         
         x_downscaled = self.downscale(x)
-        x_downscaled_rgb = F.leaky_relu(self.rgb_layers[curr_step](x_downscaled), 0.2)
+        x_downscaled_rgb = F.leaky_relu(self.rgb_layers[curr_step + 1](x_downscaled), 0.2)
         
         x_real = self.progblock[curr_step](x_rgb)
         
