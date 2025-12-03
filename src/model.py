@@ -221,9 +221,11 @@ class Discriminator(nn.Module):
         self.final_block = nn.Sequential(
             ConvLayer(in_channels=channels_size, out_channels=channels_size),
             nn.LeakyReLU(0.2),
-            ConvLayer(in_channels=channels_size, out_channels=channels_size, kernel_size=4),
+            ConvLayer(in_channels=channels_size, out_channels=channels_size, kernel_size=4, padding=0),
             nn.LeakyReLU(0.2),
-            ConvLayer(in_channels=channels_size, out_channels=1, kernel_size=1, stride=1, padding=0)
+            nn.Flatten(),
+            nn.Linear(in_features=channels_size, out_features=1),
+            nn.LeakyReLU()
         )
         
         self.progblock, self.rgb_layers = nn.ModuleList(), nn.ModuleList()
@@ -239,25 +241,37 @@ class Discriminator(nn.Module):
             self.rgb_layers.append(FromRGB(out_channels=in_channels))
             self.progblock.append(DBlock(in_channels=in_channels, out_channels=out_channels))
             
-    def forward(self, x, alpha, stage):
-        curr_step = len(layer_factors) - stage
+    def forward(self, x, stage, alpha):
+        curr_step = len(self.progblock) - stage
         
+        print(f"x : {x.shape}")
         x_rgb = F.leaky_relu(self.rgb_layers[curr_step](x), 0.2) 
+        print(f"x_rgb {x_rgb.shape}")
         
         # for 4x4 img    
         if stage == 0:
-            return self.final_block(x_rgb)
+            print(f'before {x_rgb.shape}')
+            x = self.final_block(x_rgb)
+            print(x.shape)
+            return x
         
         x_downscaled = self.downscale(x)
-        x_downscaled_rgb = F.leaky_relu(self.rgb_layers[curr_step + 1](x_downscaled), 0.2)
+        print(f"downscaled {x_downscaled.shape}")
         
-        x_real = self.progblock[curr_step](x_rgb)
+        x_downscaled_rgb = F.leaky_relu(self.rgb_layers[curr_step+1](x_downscaled), 0.2)
+        print(f"downscaled_rgb {x_downscaled_rgb.shape}")
+        
+        
+        x_real = self.progblock[curr_step - 1](x_rgb)
+        print(f"x_real {x_real.shape}")
+        
         
         out = alpha * x_real + (1 - alpha) * x_downscaled_rgb
         
-        for i in range(curr_step + 1, len(layer_factors)):
+        for i in range(curr_step, len(self.progblock) - 1): # we have final block seperate, so go until -1
             out = self.progblock[i](out)
-            
+            print(f"step {i}", out.shape)
+        
         x = self.final_block(out)
         return x
         
@@ -278,3 +292,7 @@ if __name__ == "__main__":
     gen = Generator()
     x = torch.randn(1, 512)
     print(gen(x, 3,0.5))
+    
+    x = torch.rand(1 ,3, 8, 8)
+    des = Discriminator()
+    des(x, 1, 1).shape
