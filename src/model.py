@@ -37,6 +37,7 @@ class AdaIN(nn.Module):
     
     def forward(self, x: torch.Tensor, w: torch.Tensor):
         style_params = self.A(w)# [ys, yb], scale and bias
+        print(style_params.shape)
         y_scale = style_params[:, :self.out_channels].unsqueeze(-1).unsqueeze(-1) # (B, out_channels, 1, 1)
         y_bias = style_params[: , self.out_channels: ].unsqueeze(-1).unsqueeze(-1) # (B, out_channels, 1, 1)
         # print(y_scale.shape, y_bias.shape)
