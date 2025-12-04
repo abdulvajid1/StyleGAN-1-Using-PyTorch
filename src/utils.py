@@ -29,8 +29,8 @@ def save_checkpoint(model, optimizer, global_step, filename="my_checkpoint.pth.t
 
 # Print losses occasionally and print to tensorboard
 def plot_to_tensorboard(writer, loss_critic, loss_gen, real, fake, tensorboard_step):
-    writer.add_scalar("Loss Critic", loss_critic, global_step=tensorboard_step)
-    writer.add_scalar("Loss Gen", loss_gen, global_step=tensorboard_step)
+    writer.add_scalar("Loss/Critic", loss_critic, global_step=tensorboard_step)
+    writer.add_scalar("Loss/Gen", loss_gen, global_step=tensorboard_step)
     with torch.no_grad():
         img_grid_real = torchvision.utils.make_grid(real[:8], normalize=True)
         img_grid_fake = torchvision.utils.make_grid(fake[:8], normalize=True)

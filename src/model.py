@@ -37,10 +37,8 @@ class AdaIN(nn.Module):
     
     def forward(self, x: torch.Tensor, w: torch.Tensor):
         style_params = self.A(w)# [ys, yb], scale and bias
-        print(style_params.shape)
         y_scale = style_params[:, :self.out_channels].unsqueeze(-1).unsqueeze(-1) # (B, out_channels, 1, 1)
         y_bias = style_params[: , self.out_channels: ].unsqueeze(-1).unsqueeze(-1) # (B, out_channels, 1, 1)
-        # print(y_scale.shape, y_bias.shape)
         return y_scale * ((x - x.mean(dim=[-2, -1], keepdim=True)) / x.std(dim=[-2, -1], keepdim=True) + self.eps) + y_bias
 
 class NoiseInjection(nn.Module):
@@ -180,21 +178,17 @@ class Generator(nn.Module):
             # upscaled = F.interpolate(x, scale_factor=2, mode='bilinear')
             # x = self.first_stage_block(upscaled, w)
             x = self.to_rgb_layers[0](x)
-            print(x.shape)
             return x
         
         for i in range(stage):  # go until prev stage for fade in
             upscaled = F.interpolate(x, scale_factor=2, mode='bilinear')
-            print(f"upscaled {i}", upscaled.shape)
             x = self.hidden_layers[i](upscaled, w)
-            print(f"block {i}", x.shape)
         
         # After the for loop we will get, upscaled and generated
         prev = self.to_rgb_layers[stage-1](upscaled) # rgb layers are one step ahead so, stage will be prev and stage + 1 will current
         generated = self.to_rgb_layers[stage](x)
         
         x = (alpha * generated) + ((1 - alpha) * prev)
-        print(x.shape)
         return x
 
 class DBlock(nn.Module):
@@ -220,7 +214,7 @@ class Discriminator(nn.Module):
         self.downscale = nn.AvgPool2d(kernel_size=2, stride=2)
         
         self.final_block = nn.Sequential(
-            ConvLayer(in_channels=channels_size, out_channels=channels_size),
+            ConvLayer(in_channels=channels_size+1, out_channels=channels_size),
             nn.LeakyReLU(0.2),
             ConvLayer(in_channels=channels_size, out_channels=channels_size, kernel_size=4, padding=0),
             nn.LeakyReLU(0.2),
@@ -241,38 +235,32 @@ class Discriminator(nn.Module):
             
             self.progblock.append(DBlock(in_channels=in_channels, out_channels=out_channels))
             self.rgb_layers.append(FromRGB(out_channels=out_channels))
-            
+
+    def calc_minbatch_std(self, x):
+        std_channel = torch.std(x, dim=0).mean().repeat(x.shape[0], 1, x.shape[2], x.shape[3])
+        return torch.concat([x, std_channel], dim=1)
+
     def forward(self, x, stage, alpha):
         curr_step = len(self.progblock) - stage
         
-        print(f"x : {x.shape}")
         x_rgb = F.leaky_relu(self.rgb_layers[curr_step](x), 0.2) 
-        print(f"x_rgb {x_rgb.shape}")
         
         # for 4x4 img    
         if stage == 0:
-            print(f'before {x_rgb.shape}')
+            x_rgb = self.calc_minbatch_std(x_rgb)
             x = self.final_block(x_rgb)
-            print(x.shape)
             return x
         
         x_downscaled = self.downscale(x)
-        print(f"downscaled {x_downscaled.shape}")
-        
         x_downscaled_rgb = F.leaky_relu(self.rgb_layers[curr_step + 1](x_downscaled), 0.2)
-        print(f"downscaled_rgb {x_downscaled_rgb.shape}")
-        
         
         x_real = self.progblock[curr_step](x_rgb)
-        print(f"x_real {x_real.shape}")
-        
-        
         out = alpha * x_real + (1 - alpha) * x_downscaled_rgb
         
         for i in range(curr_step + 1, len(self.progblock)): # we have final block seperate, so go until -1
             out = self.progblock[i](out)
-            print(f"step {i}", out.shape)
         
+        out = self.calc_minbatch_std(out)
         x = self.final_block(out)
         return x
         

@@ -14,6 +14,7 @@ from torchvision import datasets
 from torch.utils.data import DataLoader
 from torchvision.transforms import transforms
 from pathlib import Path
+# torch._functorch.config.donated_buffer = False
 
 logging.basicConfig(
     # filename="training.log",
@@ -35,21 +36,21 @@ BATCH_SIZES = [16, 16, 16, 16, 8, 8, 8, 4, 4]
 IMG_SIZE = 1024
 CHANNEL_SIZE = 3
 Z_DIM = 512
-LAMBDA_GP = 10
+LAMBDA_GP = 20
 IN_CHANNEL = 512
 NUM_STEPS = int(log2(IMG_SIZE) / 4) + 1
 EPOCH = 100
 SAVE_STEPS = 50
 PROGRESSIVE_EPOCH = [10] * len(BATCH_SIZES)
 FIXED_NOICE = torch.randn((1, Z_DIM), device=DEVICE)
-NUM_WORKERS = 0
+NUM_WORKERS = 4
 IMG_PATH = 'src/images'
-PIN_MEMORY = False
+PIN_MEMORY = True
 
 
 
 # add "high"
-# TODO : minbatch std
+# TODO : minbatch std, tensorboard, save some samples
 
 
 
@@ -98,7 +99,7 @@ def gradient_penalty(critic, real, fake, device="cuda", stage=1, alpha=1):
     )[0]
 
     # grads shape: (N, C, H, W)
-    grads = grads.view(batch_size, -1)
+    grads = grads.reshape(batch_size, -1)
 
     # L2 norm of gradients
     grad_norm = grads.norm(2, dim=1)
@@ -109,8 +110,8 @@ def gradient_penalty(critic, real, fake, device="cuda", stage=1, alpha=1):
     return gp
 
 
-def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stage, alpha, save_step, device, lambda_gp, writer, dataset, tensorboard_step):
-    loader = tqdm.tqdm(train_loader, dynamic_ncols=True, smoothing=0.7, desc='Epoch: ', leave=True)
+def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stage, alpha, save_step, device, lambda_gp, writer, dataset, tensorboard_step, epoch):
+    loader = tqdm.tqdm(train_loader, dynamic_ncols=True, smoothing=0.7, desc=f'Epoch: {epoch}', leave=True)
     
     for step, (real, _) in enumerate(loader):
         real = real.to(device)
@@ -119,12 +120,12 @@ def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stag
         z = torch.randn((batch_size, Z_DIM), device=device) 
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             fake = generator(z, stage, alpha)
-            fake_critic = discriminator(fake.detach(), stage, alpha)
-            real_critic = discriminator(real, stage, alpha)
+            fake_critic = discriminator(fake.detach(), stage, alpha).mean()
+            real_critic = discriminator(real, stage, alpha).mean()
             gp = gradient_penalty(discriminator, real, fake.detach(), device, stage, alpha)
-            disc_loss = ((fake_critic - real_critic).mean()
+            disc_loss = ((fake_critic - real_critic)
                          + lambda_gp * gp
-                         + 0.001 * torch.mean(real_critic)**2) # maximize (real - fake) -> minimize - (real - fake)
+                         + 0.01 * torch.mean(real_critic)**2) # maximize (real - fake) -> minimize - (real - fake)
         
         d_optimizer.zero_grad() # keeping zero grad before is not problem, since the gradient in discriminator will not update at generator update , so even if discriminator have mixed gradients it will not update
         disc_loss.backward()
@@ -148,19 +149,21 @@ def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stag
                             fake=fake.detach().float(),
                             tensorboard_step=tensorboard_step)
         
+        # loader.set_postfix({
+        #     "gen_loss": gen_loss.item(),
+        #     "disc_loss": disc_loss.item()
+        # })
+        
         tensorboard_step += 1
         
-        return tensorboard_step, alpha
+    return tensorboard_step, alpha
 
 def main():
-    # generator = torch.compile(Generator(channel_size=IN_CHANNEL, w_dim=Z_DIM, num_map_layers=8).to(DEVICE))
-    # discriminator = torch.compile(Discriminator(channels_size=IN_CHANNEL).to(DEVICE))
-    
-    generator = Generator(channel_size=IN_CHANNEL, w_dim=Z_DIM, num_map_layers=8).to(DEVICE)
+    generator = torch.compile(Generator(channel_size=IN_CHANNEL, w_dim=Z_DIM, num_map_layers=8).to(DEVICE))
     discriminator = Discriminator(channels_size=IN_CHANNEL).to(DEVICE)
-    
+
     g_optimizer = torch.optim.AdamW(generator.parameters(), lr=LEARNING_RATE)
-    d_optimizer = torch.optim.AdamW(discriminator.parameters(), lr=LEARNING_RATE)
+    d_optimizer = torch.optim.AdamW(discriminator.parameters(), lr=0.1 * LEARNING_RATE,  weight_decay=0.1)
     
     logging.info("Init Model & Optimizer")
     
@@ -188,7 +191,7 @@ def main():
         tensorboard_step = 0
         
         for epoch in range(num_epochs):
-            tensorboard_step, alpha = train(generator, discriminator, g_optimizer, d_optimizer, loader, step, alpha, SAVE_STEPS, DEVICE, LAMBDA_GP, writer, dataset, tensorboard_step)
+            tensorboard_step, alpha = train(generator, discriminator, g_optimizer, d_optimizer, loader, step, alpha, SAVE_STEPS, DEVICE, LAMBDA_GP, writer, dataset, tensorboard_step, epoch)
         
         step += 1
         

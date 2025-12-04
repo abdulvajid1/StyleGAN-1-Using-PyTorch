@@ -8,6 +8,7 @@ dependencies = [
     "albumentations>=2.0.8",
     "ipykernel>=6.31.0",
     "rich>=14.2.0",
+    "tensorboard>=2.20.0",
     "tensorboardx>=2.6.4",
     "torch>=2.8.0",
     "torchvision>=0.23.0",
