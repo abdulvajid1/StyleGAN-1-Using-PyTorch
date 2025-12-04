@@ -32,7 +32,7 @@ CHECKPOINT_DISC = 'discriminator.pth'
 DEVICE = 'cuda' if torch.cuda.is_available() else "cpu"
 LOAD_MODEL = False
 LEARNING_RATE = 1e-5
-BATCH_SIZES = [16, 16, 16, 16, 8, 8, 8, 4, 4]
+BATCH_SIZES = [32, 32, 32, 32, 16, 8, 8, 4, 4]
 IMG_SIZE = 1024
 CHANNEL_SIZE = 3
 Z_DIM = 512
@@ -41,9 +41,10 @@ IN_CHANNEL = 512
 NUM_STEPS = int(log2(IMG_SIZE) / 4) + 1
 EPOCH = 100
 SAVE_STEPS = 50
-PROGRESSIVE_EPOCH = [10] * len(BATCH_SIZES)
+# PROGRESSIVE_EPOCH = [50] * len(BATCH_SIZES)
+PROGRESSIVE_EPOCH = [20, 30, 50, 40, 30, 20, 20, 20, 20]
 FIXED_NOICE = torch.randn((1, Z_DIM), device=DEVICE)
-NUM_WORKERS = 4
+NUM_WORKERS = 6
 IMG_PATH = 'src/images'
 PIN_MEMORY = True
 
@@ -125,10 +126,11 @@ def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stag
             gp = gradient_penalty(discriminator, real, fake.detach(), device, stage, alpha)
             disc_loss = ((fake_critic - real_critic)
                          + lambda_gp * gp
-                         + 0.01 * torch.mean(real_critic)**2) # maximize (real - fake) -> minimize - (real - fake)
+                         + 0.001 * torch.mean(real_critic)**2) # maximize (real - fake) -> minimize - (real - fake)
         
         d_optimizer.zero_grad() # keeping zero grad before is not problem, since the gradient in discriminator will not update at generator update , so even if discriminator have mixed gradients it will not update
         disc_loss.backward()
+        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 1.0)
         d_optimizer.step()
         
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
@@ -137,11 +139,12 @@ def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stag
             
         g_optimizer.zero_grad()
         gen_loss.backward()
+        torch.nn.utils.clip_grad_norm_(generator.parameters(), 1.0)
         g_optimizer.step()
         
         alpha += batch_size / (len(dataset) * num_epochs)
         
-        if tensorboard_step % 100 == 0:  # Log every 100 steps
+        if tensorboard_step % 50 == 0:  # Log every 100 steps
             plot_to_tensorboard(writer=writer,
                                 loss_critic=disc_loss.item(),
                                 loss_gen=gen_loss.item(),
@@ -151,7 +154,8 @@ def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stag
         
         loader.set_postfix({
             "gen_loss": gen_loss.item(),
-            "disc_loss": disc_loss.item()
+            "disc_loss": disc_loss.item(),
+            "alpha": alpha
         })
         
         tensorboard_step += 1
@@ -162,8 +166,8 @@ def main():
     generator = torch.compile(Generator(channel_size=IN_CHANNEL, w_dim=Z_DIM, num_map_layers=8).to(DEVICE))
     discriminator = Discriminator(channels_size=IN_CHANNEL).to(DEVICE)
 
-    g_optimizer = torch.optim.AdamW(generator.parameters(), lr=LEARNING_RATE, betas=(0.0, 0.99))
-    d_optimizer = torch.optim.AdamW(discriminator.parameters(), lr=LEARNING_RATE, betas=(0.0, 0.99))
+    g_optimizer = torch.optim.AdamW(generator.parameters(), lr=10*LEARNING_RATE, betas=(0.0, 0.99), weight_decay=0.0)
+    d_optimizer = torch.optim.AdamW(discriminator.parameters(), lr=LEARNING_RATE, betas=(0.0, 0.99), weight_decay=0.01)
     
     logging.info("Init Model & Optimizer")
     
