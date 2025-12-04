@@ -2,16 +2,75 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import tqdm
+from math import log2
+from rich.logging import RichHandler
+from utils import VGGLoss
+import logging
+from model import Generator, Discriminator
+from utils import save_checkpoint, load_checkpoint
+from tensorboard import SummaryWriter
+from utils import plot_to_tensorboard
+import albumentations as A
+from torchvision import datasets
+from torch.utils.data import DataLoader
 
+logging.basicConfig(
+    # filename="training.log",
+    level=logging.INFO,
+    datefmt="[%X]",                # optional time format
+    handlers=[RichHandler()]
+    )
 
+torch.set_float32_matmul_precision('high')
+torch.backends.cudnn.benchmark = True
+
+START_TRAIN_AT_IMG_SZ = 4
+CHECKPOINT_GEN = 'generator.pth'
+CHECKPOINT_DISC = 'discriminator.pth'
+DEVICE = 'cuda' if torch.cuda.is_available() else "cpu"
+LOAD_MODEL = False
+LEARNING_RATE = 1e-3
+BATCH_SIZES = [16, 16, 16, 16, 8, 8, 8, 4, 4]
+IMG_SIZE = 512
+CHANNEL_SIZE = 3
+Z_DIM = 256
+LAMBDA_GP = 10
+IN_CHANNEL = 256
+NUM_STEPS = int(log2(IMG_SIZE) / 4) + 1
 EPOCH = 100
 SAVE_STEPS = 50
+PROGRESSIVE_EPOCH = [10] * len(BATCH_SIZES)
+FIXED_NOICE = torch.randn((BATCH_SIZES, Z_DIM), device=DEVICE)
+NUM_WORKERS = 10
+IMG_PATH = './data'
+PIN_MEMORY = True
+
+
 
 # add "high"
+# TODO : minbatch std
 
 
-import torch
-import torch.nn.functional as F
+
+def get_dataloader(img_size, step):
+    
+    transform = A.Compose(
+        transforms=[
+            A.Resize((img_size, img_size)),
+            A.HorizontalFlip(),
+            A.ToTensorV2(),
+            A.CenterCrop(p=0.3),
+            A.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+        ]
+    )
+    batch_size = BATCH_SIZES[step]
+    
+    dataset = datasets.ImageFolder(root=IMG_PATH, transform=transform)
+    loader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True, pin_memory=PIN_MEMORY, num_workers=NUM_WORKERS)
+    return loader
+    
+    
+    
 
 def gradient_penalty(critic, real, fake, device="cuda"):
     batch_size, C, H, W = real.shape
@@ -49,8 +108,8 @@ def gradient_penalty(critic, real, fake, device="cuda"):
     return gp
 
 
-def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stage, alpha, save_step, device, lambda_gp):
-    loader = tqdm.tqdm(train_loader, dynamic_ncols=True, smoothing=0.7, desc='Epoch: ')
+def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stage, alpha, save_step, device, lambda_gp, writer, dataset, tensorboard_step):
+    loader = tqdm.tqdm(train_loader, dynamic_ncols=True, smoothing=0.7, desc='Epoch: ', leave=True)
     
     for step, real in enumerate(loader):
         real = real.to(device)
@@ -62,7 +121,9 @@ def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stag
             fake_critic = discriminator(fake.detach(), stage, alpha)
             real_critic = discriminator(real, stage, alpha)
             gp = gradient_penalty(discriminator, real, fake.detach(), device)
-            disc_loss = (fake_critic - real_critic).mean() + lambda_gp * gp # maximize (real - fake) -> minimize - (real - fake)
+            disc_loss = ((fake_critic - real_critic).mean()
+                         + lambda_gp * gp
+                         + 0.001 * torch.mean(real_critic)**2) # maximize (real - fake) -> minimize - (real - fake)
         
         d_optimizer.zero_grad() # keeping zero grad before is not problem, since the gradient in discriminator will not update at generator update , so even if discriminator have mixed gradients it will not update
         disc_loss.backward()
@@ -75,6 +136,19 @@ def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stag
         g_optimizer.zero_grad()
         gen_loss.backward()
         g_optimizer.step()
+        
+        alpha += batch_size / (len(dataset))
+        
+        plot_to_tensorboard(writer=writer,
+                            loss_critic=disc_loss.item(),
+                            loss_gen=gen_loss.item(),
+                            real=real.detach(),
+                            fake=fake.detach(),
+                            tensorboard_step=tensorboard_step)
+        
+        tensorboard_step += 1
+        
+        return tensorboard_step, alpha
             
             
         
@@ -82,7 +156,37 @@ def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stag
     pass
 
 def main():
-    pass
+    generator = torch.compile(Generator(channel_size=IN_CHANNEL, w_dim=Z_DIM, num_map_layers=8).to(DEVICE))
+    discriminator = torch.compile(Discriminator(channels_size=IN_CHANNEL).to(DEVICE))
+    
+    g_optimizer = torch.optim.AdamW(generator.parameters(), lr=LEARNING_RATE)
+    d_optimizer = torch.optim.AdamW(discriminator.parameters(), lr=LEARNING_RATE)
+    
+    logging.info("Init Model & Optimizer")
+    
+    writer = SummaryWriter(f"logs/gen")    
+    
+    if LOAD_MODEL:
+        load_checkpoint(CHECKPOINT_GEN, generator, g_optimizer)
+        load_checkpoint(CHECKPOINT_DISC, discriminator, d_optimizer)
+        logging.info("loaded checkpoints")
+    
+    generator.train()
+    discriminator.train()
+    
+    step = int(log2(START_TRAIN_AT_IMG_SZ / 4))
+    
+    for num_epochs in PROGRESSIVE_EPOCH[step: ]:
+        loader, dataset = get_dataloader(4*2**step, step)
+        alpha = 1e-8
+        
+        logging.info(f"Image size is {4*2**step}")
+        
+        for epoch in range(num_epochs):
+            tensorboard_step, alpha = train(generator, discriminator, g_optimizer, d_optimizer, loader, step, alpha, SAVE_STEPS, DEVICE, LAMBDA_GP, writer, dataset, tensorboard_step)
+        
+        step += 1
+        
 
 if __name__ == "__main__":
     main()
