@@ -39,7 +39,7 @@ class AdaIN(nn.Module):
         style_params = self.A(w)# [ys, yb], scale and bias
         y_scale = style_params[:, :self.out_channels].unsqueeze(-1).unsqueeze(-1) # (B, out_channels, 1, 1)
         y_bias = style_params[: , self.out_channels: ].unsqueeze(-1).unsqueeze(-1) # (B, out_channels, 1, 1)
-        return y_scale * ((x - x.mean(dim=[-2, -1], keepdim=True)) / x.std(dim=[-2, -1], keepdim=True) + self.eps) + y_bias
+        return y_scale * ((x - x.mean(dim=[-2, -1], keepdim=True)) / (x.std(dim=[-2, -1], keepdim=True) + self.eps)) + y_bias
 
 class NoiseInjection(nn.Module):
     def __init__(self, channels):
@@ -129,7 +129,7 @@ class ToRGB(nn.Module):
         self.conv = ConvLayer(in_channels=in_channels, out_channels=3, kernel_size=1, stride=1, padding=0) # conv1x1
         
     def forward(self, x: torch.Tensor):
-        return self.conv(x)
+        return F.tanh(self.conv(x))
     
 class FromRGB(nn.Module):
     def __init__(self, out_channels):
@@ -220,7 +220,6 @@ class Discriminator(nn.Module):
             nn.LeakyReLU(0.2),
             nn.Flatten(),
             nn.Linear(in_features=channels_size, out_features=1),
-            nn.LeakyReLU()
         )
         
         self.progblock, self.rgb_layers = nn.ModuleList(), nn.ModuleList()

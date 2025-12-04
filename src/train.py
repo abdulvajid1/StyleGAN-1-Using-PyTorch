@@ -31,12 +31,12 @@ CHECKPOINT_GEN = 'generator.pth'
 CHECKPOINT_DISC = 'discriminator.pth'
 DEVICE = 'cuda' if torch.cuda.is_available() else "cpu"
 LOAD_MODEL = False
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 1e-5
 BATCH_SIZES = [16, 16, 16, 16, 8, 8, 8, 4, 4]
 IMG_SIZE = 1024
 CHANNEL_SIZE = 3
 Z_DIM = 512
-LAMBDA_GP = 20
+LAMBDA_GP = 10
 IN_CHANNEL = 512
 NUM_STEPS = int(log2(IMG_SIZE) / 4) + 1
 EPOCH = 100
@@ -110,7 +110,7 @@ def gradient_penalty(critic, real, fake, device="cuda", stage=1, alpha=1):
     return gp
 
 
-def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stage, alpha, save_step, device, lambda_gp, writer, dataset, tensorboard_step, epoch):
+def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stage, alpha, save_step, device, lambda_gp, writer, dataset, tensorboard_step, epoch, num_epochs):
     loader = tqdm.tqdm(train_loader, dynamic_ncols=True, smoothing=0.7, desc=f'Epoch: {epoch}', leave=True)
     
     for step, (real, _) in enumerate(loader):
@@ -139,20 +139,20 @@ def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stag
         gen_loss.backward()
         g_optimizer.step()
         
-        alpha += batch_size / (len(dataset))
+        alpha += batch_size / (len(dataset) * num_epochs)
         
+        if tensorboard_step % 100 == 0:  # Log every 100 steps
+            plot_to_tensorboard(writer=writer,
+                                loss_critic=disc_loss.item(),
+                                loss_gen=gen_loss.item(),
+                                real=real.detach().float(),
+                                fake=fake.detach().float(),
+                                tensorboard_step=tensorboard_step)
         
-        plot_to_tensorboard(writer=writer,
-                            loss_critic=disc_loss.item(),
-                            loss_gen=gen_loss.item(),
-                            real=real.detach().float(),
-                            fake=fake.detach().float(),
-                            tensorboard_step=tensorboard_step)
-        
-        # loader.set_postfix({
-        #     "gen_loss": gen_loss.item(),
-        #     "disc_loss": disc_loss.item()
-        # })
+        loader.set_postfix({
+            "gen_loss": gen_loss.item(),
+            "disc_loss": disc_loss.item()
+        })
         
         tensorboard_step += 1
         
@@ -162,8 +162,8 @@ def main():
     generator = torch.compile(Generator(channel_size=IN_CHANNEL, w_dim=Z_DIM, num_map_layers=8).to(DEVICE))
     discriminator = Discriminator(channels_size=IN_CHANNEL).to(DEVICE)
 
-    g_optimizer = torch.optim.AdamW(generator.parameters(), lr=LEARNING_RATE)
-    d_optimizer = torch.optim.AdamW(discriminator.parameters(), lr=0.1 * LEARNING_RATE,  weight_decay=0.1)
+    g_optimizer = torch.optim.AdamW(generator.parameters(), lr=LEARNING_RATE, betas=(0.0, 0.99))
+    d_optimizer = torch.optim.AdamW(discriminator.parameters(), lr=LEARNING_RATE, betas=(0.0, 0.99))
     
     logging.info("Init Model & Optimizer")
     
@@ -191,8 +191,9 @@ def main():
         tensorboard_step = 0
         
         for epoch in range(num_epochs):
-            tensorboard_step, alpha = train(generator, discriminator, g_optimizer, d_optimizer, loader, step, alpha, SAVE_STEPS, DEVICE, LAMBDA_GP, writer, dataset, tensorboard_step, epoch)
-        
+            tensorboard_step, alpha = train(generator, discriminator, g_optimizer, d_optimizer, loader, step, alpha, SAVE_STEPS, DEVICE, LAMBDA_GP, writer, dataset, tensorboard_step, epoch, num_epochs)
+            alpha = min(1.0, alpha)
+
         step += 1
         
 
