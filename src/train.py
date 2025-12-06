@@ -31,8 +31,9 @@ CHECKPOINT_GEN = 'generator.pth'
 CHECKPOINT_DISC = 'discriminator.pth'
 DEVICE = 'cuda' if torch.cuda.is_available() else "cpu"
 LOAD_MODEL = False
-LEARNING_RATE = 1e-5
-BATCH_SIZES = [32, 32, 32, 32, 16, 8, 8, 4, 4]
+LEARNING_RATE_G = 5e-5
+LEARNING_RATE_D = 2e-5
+BATCH_SIZES = [32, 32, 32, 32, 32, 16, 16, 8, 4]
 IMG_SIZE = 1024
 CHANNEL_SIZE = 3
 Z_DIM = 512
@@ -42,7 +43,7 @@ NUM_STEPS = int(log2(IMG_SIZE) / 4) + 1
 EPOCH = 100
 SAVE_STEPS = 50
 # PROGRESSIVE_EPOCH = [50] * len(BATCH_SIZES)
-PROGRESSIVE_EPOCH = [20, 30, 50, 40, 30, 20, 20, 20, 20]
+PROGRESSIVE_EPOCH = [15, 40, 60, 70, 30, 20, 20, 20, 20]
 FIXED_NOICE = torch.randn((1, Z_DIM), device=DEVICE)
 NUM_WORKERS = 6
 IMG_PATH = 'src/images'
@@ -142,7 +143,7 @@ def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stag
         torch.nn.utils.clip_grad_norm_(generator.parameters(), 1.0)
         g_optimizer.step()
         
-        alpha += batch_size / (len(dataset) * num_epochs)
+        alpha += batch_size / (len(dataset) * (num_epochs*0.5))
         
         if tensorboard_step % 50 == 0:  # Log every 100 steps
             plot_to_tensorboard(writer=writer,
@@ -157,17 +158,20 @@ def train(generator, discriminator, g_optimizer, d_optimizer, train_loader, stag
             "disc_loss": disc_loss.item(),
             "alpha": alpha
         })
-        
+
+        writer.add_scalar("Loss/Critic", disc_loss.item(), global_step=tensorboard_step)
+        writer.add_scalar("Loss/Gen", gen_loss.item(), global_step=tensorboard_step)
+
         tensorboard_step += 1
         
     return tensorboard_step, alpha
 
 def main():
-    generator = torch.compile(Generator(channel_size=IN_CHANNEL, w_dim=Z_DIM, num_map_layers=8).to(DEVICE))
+    generator = Generator(channel_size=IN_CHANNEL, w_dim=Z_DIM, num_map_layers=8).to(DEVICE)
     discriminator = Discriminator(channels_size=IN_CHANNEL).to(DEVICE)
 
-    g_optimizer = torch.optim.AdamW(generator.parameters(), lr=10*LEARNING_RATE, betas=(0.0, 0.99), weight_decay=0.0)
-    d_optimizer = torch.optim.AdamW(discriminator.parameters(), lr=LEARNING_RATE, betas=(0.0, 0.99), weight_decay=0.01)
+    g_optimizer = torch.optim.Adam(generator.parameters(), lr=LEARNING_RATE_G, betas=(0.0, 0.99))
+    d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=LEARNING_RATE_D, betas=(0.0, 0.99))
     
     logging.info("Init Model & Optimizer")
     

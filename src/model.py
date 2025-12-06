@@ -115,11 +115,11 @@ class InitialBlock(nn.Module):
         b = w.shape[0]
         x = self.const_input.repeat(b, 1, 1, 1)
         x = self.noise1(x)
-        x = F.leaky_relu(x)
+        x = F.leaky_relu(x, 0.2)
         x = self.adain1(x, w)
         x = self.conv(x)
         x = self.noise2(x)
-        x = F.leaky_relu(x)
+        x = F.leaky_relu(x, 0.2)
         x = self.adain2(x, w)
         return x
 
@@ -129,7 +129,7 @@ class ToRGB(nn.Module):
         self.conv = ConvLayer(in_channels=in_channels, out_channels=3, kernel_size=1, stride=1, padding=0) # conv1x1
         
     def forward(self, x: torch.Tensor):
-        return F.tanh(self.conv(x))
+        return self.conv(x)
     
 class FromRGB(nn.Module):
     def __init__(self, out_channels):
@@ -178,7 +178,7 @@ class Generator(nn.Module):
             # upscaled = F.interpolate(x, scale_factor=2, mode='bilinear')
             # x = self.first_stage_block(upscaled, w)
             x = self.to_rgb_layers[0](x)
-            return x
+            return F.tanh(x)
         
         for i in range(stage):  # go until prev stage for fade in
             upscaled = F.interpolate(x, scale_factor=2, mode='bilinear')
@@ -189,7 +189,7 @@ class Generator(nn.Module):
         generated = self.to_rgb_layers[stage](x)
         
         x = (alpha * generated) + ((1 - alpha) * prev)
-        return x
+        return F.tanh(x)
 
 class DBlock(nn.Module):
     def __init__(self, in_channels, out_channels, w_dim=512):
