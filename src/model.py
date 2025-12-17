@@ -30,21 +30,23 @@ class AdaIN(nn.Module):
         super().__init__()
         self.out_channels = out_channels
         self.eps = 1e-8
+        self.norm = torch.nn.InstanceNorm2d(out_channels)
+
         # each channel will have it's own y_scale and y_bias
         self.A = nn.Linear(in_features=w_dim, out_features=2*out_channels, bias=True)
         self.A.weight.data.normal_(0, 1.0)
         self.A.bias.data.zero_()
-    
     def forward(self, x: torch.Tensor, w: torch.Tensor):
         style_params = self.A(w)# [ys, yb], scale and bias
         y_scale = style_params[:, :self.out_channels].unsqueeze(-1).unsqueeze(-1) # (B, out_channels, 1, 1)
         y_bias = style_params[: , self.out_channels: ].unsqueeze(-1).unsqueeze(-1) # (B, out_channels, 1, 1)
-        return y_scale * ((x - x.mean(dim=[-2, -1], keepdim=True)) / (x.std(dim=[-2, -1], keepdim=True) + self.eps)) + y_bias
+        # return y_scale * ((x - x.mean(dim=[-2, -1], keepdim=True)) / (x.std(dim=[-2, -1], keepdim=True) + self.eps)) + y_bias
+        return y_scale * self.norm(x) + y_bias
 
 class NoiseInjection(nn.Module):
     def __init__(self, channels):
         super().__init__()
-        self.scale_b = nn.Parameter(torch.zeros(channels))
+        self.scale_b = nn.Parameter(torch.zeros(1, channels, 1 ,1))
         
     def forward(self, x: torch.Tensor):
         batch_size, C, H, W = x.shape
@@ -102,7 +104,7 @@ class InitialBlock(nn.Module):
     def __init__(self, channels):
         super().__init__()
         # learned constant lantent input
-        self.const_input = nn.Parameter(torch.randn(1, channels, 4, 4))
+        self.const_input = nn.Parameter(torch.ones(1, channels, 4, 4))
         
         self.conv = ConvLayer(in_channels=channels, out_channels=channels)
         self.adain1 = AdaIN(out_channels=channels)
